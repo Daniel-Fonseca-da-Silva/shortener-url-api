@@ -1,16 +1,20 @@
 package main
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/go-redis/redis/v8"
 	"go.uber.org/zap"
 )
 
@@ -22,7 +26,21 @@ var (
 	sugar       *zap.SugaredLogger
 )
 
+type RateLimiter struct {
+	client  *redis.Client
+	limit   int
+	window  time.Duration
+	context context.Context
+}
+
 func main() {
+	client := redis.NewClient(&redis.Options{
+		Addr: "redis:6379",
+	})
+	defer client.Close()
+
+	rateLimiter := NewRateLimiter(client, 10, 1*time.Minute)
+
 	logger, err := zap.NewProduction()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to initialize logger: %v", err))
@@ -32,11 +50,47 @@ func main() {
 	sugar = logger.Sugar()
 	sugar.Info("URL Shortener service starting on port 8080")
 
-	http.HandleFunc("/shorten", shortenUrl)
-	http.HandleFunc("/", redirectHandler)
+	router := http.NewServeMux()
+	router.HandleFunc("/shorten", shortenUrl)
+	router.HandleFunc("/", redirectHandler)
 
+	handler := rateLimiterMiddleware(rateLimiter, router)
+
+	http.ListenAndServe(":8080", handler)
 	sugar.Info("Server is running on port 8080")
-	sugar.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func (rl *RateLimiter) allow(key string) bool {
+	pipe := rl.client.TxPipeline()
+	incr := pipe.Incr(rl.context, key)
+	pipe.Expire(rl.context, key, rl.window)
+
+	_, err := pipe.Exec(rl.context)
+	if err != nil {
+		return false
+	}
+	return incr.Val() <= int64(rl.limit)
+}
+
+func NewRateLimiter(client *redis.Client, limit int, window time.Duration) *RateLimiter {
+	return &RateLimiter{
+		client:  client,
+		limit:   limit,
+		window:  window,
+		context: context.Background(),
+	}
+}
+
+func rateLimiterMiddleware(rl *RateLimiter, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if !rl.allow(clientIP) {
+			http.Error(w, "too many request", http.StatusTooManyRequests)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func encrypt(orignalUrl string) (result string) {

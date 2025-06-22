@@ -1,6 +1,6 @@
 # 🔗 URL Shortener API
 
-A simple and efficient URL shortening API developed in Go, with AES encryption and structured logging.
+A simple and efficient URL shortening API developed in Go, with AES encryption, Redis-based rate limiting, and structured logging.
 
 ## 📋 Table of Contents
 
@@ -24,6 +24,7 @@ A simple and efficient URL shortening API developed in Go, with AES encryption a
 - **Structured Logging**: Detailed logs with Zap
 - **Input Validation**: Valid URL verification
 - **Thread-safe**: Concurrent access with mutex
+- **Rate Limiting**: Performed using Redis
 - **Containerization**: Docker and Docker Compose ready
 
 ## 🏗️ Architecture
@@ -42,12 +43,15 @@ A simple and efficient URL shortening API developed in Go, with AES encryption a
 - **Crypto Engine**: AES-CTR encryption/decryption
 - **ID Generator**: Random short ID generator
 - **Logger**: Structured logging system
+- **Rate Limiter**: Uses Redis for request limiting
+- **Redis**: Used for rate limiting (service runs as a container)
 
 ## 🛠️ Technologies
 
 - **Go 1.24.1**: Main language
 - **Zap**: Structured logging
 - **AES-CTR**: Encryption
+- **Redis**: Rate limiting backend
 - **Docker**: Containerization
 - **Alpine Linux**: Optimized base image
 
@@ -68,7 +72,7 @@ cd shortener-url-api
 # Install dependencies
 go mod download
 
-# Run the application
+# Run the application (requires a local Redis instance running on port 6379)
 go run main.go
 ```
 
@@ -78,18 +82,18 @@ go run main.go
 # Build image
 docker build -t url-shortener .
 
-# Run
+# Run (requires a local Redis instance running on port 6379)
 docker run -p 8080:8080 url-shortener
 ```
 
 ### Docker Compose Installation
 
 ```bash
-# Build and run
-docker-compose up --build
+# Build and run all services (including Redis)
+docker compose up --build
 
 # Run in background
-docker-compose up -d
+docker compose up -d
 ```
 
 ## 📖 Usage
@@ -173,28 +177,73 @@ docker build -t url-shortener .
 ### Run
 
 ```bash
-# Simple execution
+# Simple execution (requires a local Redis instance)
 docker run -p 8080:8080 url-shortener
-
-# With environment variables
-docker run -p 8080:8080 -e PORT=8080 url-shortener
 ```
 
 ### Docker Compose
 
 ```bash
-# Complete execution
-docker-compose up --build
+# Complete execution (runs both the app and Redis)
+docker compose up --build
 
 # Run in background
-docker-compose up -d
+docker compose up -d
 
 # View logs
-docker-compose logs -f
+docker compose logs -f
 
 # Stop services
-docker-compose down
+docker compose down
 ```
+
+#### Example docker-compose.yml
+
+```yaml
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - url-shortener-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  url-shortener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - url-shortener-network
+
+networks:
+  url-shortener-network:
+    driver: bridge
+```
+
+**Note:**
+- The Go application is configured to connect to Redis using the hostname `redis:6379` (the service name in Docker Compose).
+- No environment variables are required for Redis configuration.
 
 ## 🔧 Development
 
@@ -234,6 +283,7 @@ The system uses structured logging with different levels:
 - **Input Validation**: Valid URL verification
 - **Non-root User**: Container runs with non-privileged user
 - **Health Checks**: Application health monitoring
+- **Rate Limiting**: Performed using Redis
 
 ### Security Limitations
 
